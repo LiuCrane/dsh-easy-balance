@@ -1,0 +1,39 @@
+{
+  "name": "dsh-easy-balance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH Web UI enhancements: the composer model selector shows its provider, and a strip under the composer shows the DeepSeek balance plus the OpenCode Go plan usage for the providers this profile actually configures.",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/en.json",
+    "locale/zh.json",
+    "README.md"
+  ],
+  "meta": {
+    "title": "Easy Balance",
+    "description": "Provider badge beside the composer model selector, plus DeepSeek balance and OpenCode Go usage below the composer - only for providers that are configured."
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ]
+    }
+  }
+}

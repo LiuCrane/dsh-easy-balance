@@ -1,0 +1,4 @@
+{
+  "title": "界面增强",
+  "description": "在输入框模型选择器旁显示服务商，并在输入框下方显示 DeepSeek 余额与 OpenCode Go 用量。"
+}
