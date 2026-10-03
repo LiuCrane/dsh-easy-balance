@@ -1,6 +1,6 @@
 {
   "name": "dsh-easy-balance",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "DSH Web UI enhancements: the composer model selector shows its provider, and a strip under the composer shows the DeepSeek balance plus the OpenCode Go plan usage for the providers this profile actually configures.",

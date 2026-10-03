@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
     const USAGE_PATH = "/easy-balance/usage";
     /** Background refresh cadence for the ambient strip. */
     const POLL_MS = 300000;
+    /** How often the provider chip may ask for a cleared model catalog to reload. */
+    const RELOAD_THROTTLE_MS = 15000;
 
     const zh = {
       "provider.label": "服务商",
@@ -451,25 +453,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Resolve one session's shared model directory, or null when it cannot be
+     * resolved yet.
+     *
+     * Deliberately NOT memoized: the resolver keys directories by the session's
+     * current binding and hands out a fresh one after a re-attach, disposing the
+     * previous store. A memoized directory therefore freezes on a dead store —
+     * the label stops updating and, once that store's `current` is null, never
+     * comes back.
+     *
+     * @param directories - `ctx.modelDirectories`.
+     * @param sessionId - the session whose directory is wanted.
+     * @returns the live directory, or null.
+     */
+    function resolveDirectory(directories, sessionId) {
+      if (directories === undefined || directories === null || typeof directories.directoryFor !== "function") return null;
+      if (sessionId === undefined || sessionId === null) return null;
+      try {
+        return directories.directoryFor(sessionId);
+      } catch {
+        return null;
+      }
+    }
+
+    /**
+     * Durably-selected model for one session, from the `modelSelection`
+     * projection. The projection is the session log's own fold, so it keeps
+     * naming the provider while the shared model catalog is cleared (a Host
+     * generation reset nulls the directory's `current` until a catalog load
+     * lands), and for a brand-new session it names whatever is selected.
+     *
+     * @param useProjection - the slot's projection hook, when present.
+     * @returns a `{provider, model}` selection, or null.
+     */
+    function useDurableSelection(useProjection) {
+      const projection = useProjection === null ? undefined : useProjection("modelSelection");
+      if (projection === undefined || projection === null) return null;
+      const selection = projection.next ?? projection.lastUsed;
+      if (selection === undefined || selection === null) return null;
+      return selection;
+    }
+
+    /**
      * Provider chip for the composer model row.
-     * @param props - injected face (directories, t) plus the session identity.
+     * @param props - injected face (directories, t) plus the session identity and standard hooks.
      * @returns the chip, or null while no selection is known.
      */
     function ProviderChip(props) {
       const t = props.t;
       const directories = props.directories;
       const sessionId = props.sessionId;
+      const useProjection = typeof props.useProjection === "function" ? props.useProjection : null;
 
-      const directory = React.useMemo(() => {
-        if (directories === undefined || directories === null || typeof directories.directoryFor !== "function") return null;
-        if (sessionId === undefined || sessionId === null) return null;
-        try {
-          return directories.directoryFor(sessionId);
-        } catch {
-          return null;
-        }
-      }, [directories, sessionId]);
-
+      const directory = resolveDirectory(directories, sessionId);
       const store = directory === null ? null : directory.store;
       const subscribe = React.useCallback(
         (notify) => {
@@ -480,9 +516,19 @@ window.__ModuleLoader__.load({
       );
       const getSnapshot = React.useCallback(() => (store === null ? null : store.getSnapshot()), [store]);
       const state = React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+      const durable = useDurableSelection(useProjection);
 
+      // Refill a cleared catalog on its own, so the chip recovers without the
+      // user opening the model menu. Throttled: a failing catalog retries at a
+      // calm pace instead of spinning.
+      const reloadedAt = React.useRef(0);
       React.useEffect(() => {
         if (directory === null) return undefined;
+        const known = state !== null && state !== undefined && state.current !== null;
+        if (known) return undefined;
+        const now = Date.now();
+        if (now - reloadedAt.current < RELOAD_THROTTLE_MS) return undefined;
+        reloadedAt.current = now;
         let live = true;
         Promise.resolve()
           .then(() => (live ? directory.load() : undefined))
@@ -490,9 +536,10 @@ window.__ModuleLoader__.load({
         return () => {
           live = false;
         };
-      }, [directory]);
+      }, [directory, state]);
 
-      const current = state !== null && state !== undefined && state.current ? state.current : null;
+      const resolved = state !== null && state !== undefined && state.current ? state.current : null;
+      const current = resolved === null ? durable : resolved;
       if (current === null || typeof current.provider !== "string" || current.provider === "") return null;
 
       const groups = state !== null && state !== undefined && Array.isArray(state.groups) ? state.groups : [];

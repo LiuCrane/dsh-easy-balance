@@ -166,22 +166,39 @@ const registrations = [];
 const dictionaries = [];
 let injectedServices = null;
 
-const fakeStore = {
-  getSnapshot() {
-    return {
-      current: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
-      groups: [{ id: "opencode-go", name: "OpenCode Go", models: [] }],
-      status: "ready",
-    };
-  },
-  subscribe() {
-    return () => {};
-  },
+let directorySnapshot = {
+  current: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+  groups: [{ id: "opencode-go", name: "OpenCode Go", models: [] }],
+  status: "ready",
 };
+let loads = 0;
+let directoryForThrows = false;
+let bindingGeneration = 1;
+
+/** A fresh store per binding generation: a re-attach hands out a new directory. */
+function makeStore(generation) {
+  return {
+    generation,
+    getSnapshot() {
+      return generation === bindingGeneration ? directorySnapshot : { current: null, groups: [], status: "idle" };
+    },
+    subscribe() {
+      return () => {};
+    },
+  };
+}
+const fakeStore = makeStore(1);
 const fakeDirectories = {
   directoryFor(sessionId) {
-    check("model directory requested for the session", sessionId === "session-1", String(sessionId));
-    return { store: fakeStore, load: async () => fakeStore.getSnapshot() };
+    if (sessionId !== "session-1") throw new Error("unexpected session " + String(sessionId));
+    if (directoryForThrows) throw new Error("ui-model-selection: session resolved no binding");
+    return {
+      store: makeStore(bindingGeneration),
+      load: async () => {
+        loads += 1;
+        return directorySnapshot;
+      },
+    };
   },
 };
 
@@ -255,26 +272,53 @@ function runPendingEffects(store) {
   for (const cell of pending) cell.cleanup = cell.effect();
 }
 
-async function render(Component, props, elements = []) {
+/**
+ * One mounted component instance: hook cells persist across `rerender`, the way
+ * a live chip keeps its state while the session re-attaches underneath it.
+ * @param Component - component under test.
+ * @param props - initial props.
+ * @param elements - simulated DOM elements for `ref` props.
+ * @returns the instance and its tree.
+ */
+function createRenderer(Component, props, elements = []) {
   const store = createStore();
-  React.__store = store;
-  const run = () => {
+  const run = (nextProps) => {
+    React.__store = store;
     store.index = 0;
     store.dirty = false;
-    const tree = Component(props);
-    elements.forEach((element, index) => {
+    const tree = Component(nextProps);
+    for (const element of elements) {
       if (element !== undefined) attachRefs(tree, element);
-    });
+    }
     runPendingEffects(store);
     return tree;
   };
-  let tree = run();
-  for (let i = 0; i < 25; i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    if (!store.dirty) break;
-    tree = run();
-  }
-  return { tree, store };
+  let tree = run(props);
+  const settle = async (nextProps) => {
+    for (let i = 0; i < 25; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (!store.dirty) break;
+      tree = run(nextProps);
+    }
+    return tree;
+  };
+  return {
+    store,
+    get tree() {
+      return tree;
+    },
+    settle,
+    async rerender(nextProps) {
+      tree = run(nextProps);
+      return settle(nextProps);
+    },
+  };
+}
+
+async function render(Component, props, elements = []) {
+  const instance = createRenderer(Component, props, elements);
+  const tree = await instance.settle(props);
+  return { tree, store: instance.store };
 }
 
 // --- usage strip
@@ -383,6 +427,66 @@ async function render(Component, props, elements = []) {
   check("chip carries the provider id", chip !== undefined && chip.props["data-provider"] === "opencode-go", chip && String(chip.props["data-provider"]));
   check("chip tooltip names the provider", chip !== undefined && String(chip.props.title).includes("opencode-go"), chip && String(chip.props.title));
   unmount(store);
+}
+
+// --- provider chip survives the two ways it used to vanish after a long run
+{
+  // 1. A cleared shared catalog nulls the directory's `current`; the durable
+  //    modelSelection projection still names the provider.
+  directorySnapshot = { current: null, groups: [], status: "loading" };
+  const projection = { lastUsed: null, next: { provider: "opencode-go", model: "deepseek-v4.1-flash" } };
+  const useProjection = (key) => (key === "modelSelection" ? projection : undefined);
+  const { tree, store } = await render(providerReg.Component, {
+    ...injectProps(providerReg),
+    sessionId: "session-1",
+    useProjection,
+  });
+  const chip = findNodes(tree, (node) => node.props["data-provider"] !== undefined)[0];
+  check("a cleared catalog still names the provider from the durable projection", chip !== undefined && chip.props["data-provider"] === "opencode-go", JSON.stringify(texts(tree)));
+  check("a cleared catalog falls back to the provider id", texts(tree).join(" | ").includes("opencode-go"), texts(tree).join(" | "));
+  check("a cleared catalog is asked to reload", loads > 0, "loads=" + loads);
+  unmount(store);
+
+  // 2. A re-attach hands out a new binding and disposes the previous store: the
+  //    chip must follow the live directory instead of freezing on the dead one.
+  directorySnapshot = { current: { provider: "opencode-go", model: "deepseek-v4.1-flash" }, groups: [], status: "ready" };
+  bindingGeneration = 1;
+  // One live instance, re-rendered: exactly what a resident composer does when
+  // the session re-attaches underneath a chip that never unmounts.
+  const liveProps = { ...injectProps(providerReg), sessionId: "session-1" };
+  const live = createRenderer(providerReg.Component, liveProps);
+  await live.settle(liveProps);
+  check("chip reads the first binding", live.tree !== null && live.tree.props["data-provider"] === "opencode-go", JSON.stringify(texts(live.tree)));
+  // the re-attach: a new binding, a new directory, and the old store now reads null
+  directorySnapshot = { current: { provider: "lm-studio", model: "qwen3.8-27b" }, groups: [], status: "ready" };
+  bindingGeneration = 2;
+  await live.rerender(liveProps);
+  check("chip follows the new binding after a re-attach", live.tree !== null && live.tree.props["data-provider"] === "lm-studio", JSON.stringify(texts(live.tree)));
+  unmount(live.store);
+
+  // 3. Nothing known at all: still renders nothing rather than a wrong label.
+  directorySnapshot = { current: null, groups: [], status: "idle" };
+  const none = await render(providerReg.Component, { ...injectProps(providerReg), sessionId: "session-1" });
+  check("chip renders nothing when no selection is known", none.tree === null, JSON.stringify(texts(none.tree)));
+  unmount(none.store);
+
+  // 4. A directory that cannot be resolved yet must not be remembered as broken.
+  directoryForThrows = true;
+  const broken = await render(providerReg.Component, { ...injectProps(providerReg), sessionId: "session-1" });
+  check("chip hides while its directory cannot be resolved", broken.tree === null);
+  directoryForThrows = false;
+  directorySnapshot = { current: { provider: "deepseek-official", model: "deepseek-v4-pro" }, groups: [], status: "ready" };
+  const recovered = await render(providerReg.Component, { ...injectProps(providerReg), sessionId: "session-1" });
+  check("chip recovers as soon as the directory resolves again", recovered.tree !== null && recovered.tree.props["data-provider"] === "deepseek-official", JSON.stringify(texts(recovered.tree)));
+  unmount(broken.store);
+  unmount(recovered.store);
+
+  directorySnapshot = {
+    current: { provider: "opencode-go", model: "deepseek-v4.1-flash" },
+    groups: [{ id: "opencode-go", name: "OpenCode Go", models: [] }],
+    status: "ready",
+  };
+  bindingGeneration = 1;
 }
 
 // --- error path: both providers failing must still render

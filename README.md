@@ -131,6 +131,14 @@ a logic test, not visual verification.
   `--dsw-alias-*` tokens and the host's `--dsh-content-font-*` properties, so
   light and dark palettes and host font scaling both apply. No Harness Client
   package is imported at runtime.
+- **The provider chip outlives a model-catalog reset.** It resolves the session's
+  model directory on *every* render — `directoryFor` keys directories by the
+  session's current binding and hands out a fresh one after a re-attach, disposing
+  the old store, so a memoized directory freezes on a dead store — reads the
+  provider from the durable `modelSelection` projection when the shared model
+  catalog has been cleared (a Host generation reset nulls the directory's
+  `current`), and asks a cleared catalog to reload on its own (15 s throttle) so
+  the label returns without the user opening the model menu.
 - **DeepSeek category needs the API-key route.** It reads the platform balance with
   `DEEPSEEK_API_KEY`. A DSH *account* sign-in alone (the `deepseek-account` route)
   does not show a balance, because that figure comes from a different service.
